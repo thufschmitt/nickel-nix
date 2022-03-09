@@ -4,21 +4,43 @@ let
       let type = builtins.typeOf value; in
       if (type == "set") then (
         if (value.type or "" == "derivation") then
-          { type = "nixDerivation"; drvPath = value.drvPath; outputName = value.outputName; }
+          {
+            value = { type = "nixDerivation"; drvPath = value.drvPath; outputName = value.outputName; };
+            context = { ${builtins.unsafeDiscardStringContext value.drvPath} = value; };
+          }
         else
-          builtins.mapAttrs (_: exportForNickel) value
+          builtins.foldl'
+          (acc: eltName:
+            let exportedElt = exportForNickel value.${eltName}; in
+            {
+              value = { ${eltName} = exportedElt.value; } // acc.value;
+              context = exportedElt.context // acc.context;
+            }
+          )
+          {value = {}; context = {};}
+          (builtins.attrNames value)
         )
-      else if (type == "list") then builtins.map exportForNickel value
+      else if (type == "list") then # builtins.map exportForNickel value
+         builtins.foldl'
+         (acc: elt:
+            let exportedElt = exportForNickel elt; in
+            {
+              value = [exportedElt.value] ++ acc.value;
+              context = exportedElt.context // acc.context;
+            }
+          )
+          {value = []; context = {};}
+          value
       else if (type == "list") then
         throw "Can’t export a function"
-      else value;
+        else { value = value; context = {}; };
 
   # Import a Nickel value produced by the Nixel DSL
-  importFromNickel = mkShell: value:
+  importFromNickel = context: mkShell: value:
     let
       type = builtins.typeOf value;
       isNickelDerivation = type: type == "nickelPackage" || type == "nickelShell";
-      importFromNickel_ = importFromNickel mkShell;
+      importFromNickel_ = importFromNickel context mkShell;
     in
     if (type == "set") then (
       let valueType = value.type or ""; in
@@ -27,7 +49,8 @@ let
       else if valueType == "nickelShell" then
         mkShell (builtins.mapAttrs (_: importFromNickel_) value)
       else if valueType == "nixDerivation" then
-        (import value.drvPath).${value.outputName or "out"}
+        # (import value.drvPath).${value.outputName or "out"}
+        context.${value.drvPath}.${value.outputName or "out"}
       else if valueType == "nixString" then
         builtins.concatStringsSep "" (builtins.map importFromNickel_ value.fragments)
       else
@@ -39,11 +62,11 @@ let
 
   # Generate a Nickel program that evaluates the nickel-nix output, passing
   # the given exported packages, and write it to outFile.
-  computeNickelFile = system: {nickelFile, exportedPkgs}:
+  computeNickelFile = system: {nickelFile, exportedPkgsNcl}:
     let
       exportedJSON = builtins.toFile
           "inputs.json"
-          (builtins.unsafeDiscardStringContext (builtins.toJSON (exportForNickel exportedPkgs)));
+          (builtins.unsafeDiscardStringContext (builtins.toJSON (exportedPkgsNcl)));
 
       nickelWithImports = builtins.toFile "eval.ncl" ''
           let params = {
@@ -89,7 +112,11 @@ let
                 flakeInputs.${inputName}.${system}.packages;
           in
           if builtins.hasAttr name input then
-            acc // {"${name}" = exportForNickel input.${name};}
+          let exported = exportForNickel input.${name}; in
+          {
+            value = acc.value // {"${name}" = exported.value;};
+            context = acc.context // exported.context;
+          }
           else
             builtins.throw ''
               Could not find package `${name}` in input `${inputName}`
@@ -103,7 +130,7 @@ let
               }
           '';
     in
-    lib.lists.foldr addPackage {} (builtins.attrNames declaredInputs);
+    lib.lists.foldr addPackage {value = {}; context = {}; } (builtins.attrNames declaredInputs);
 
   # Call Nickel on a given Nickel expression with the inputs declared in it.
   # See importNcl for details about the flakeInputs parameter.
@@ -111,12 +138,16 @@ let
     let
       declaredInputs = extractInputs { inherit runCommand nickel system; } nickelFile;
       exportedPkgs = exportInputs system lib { inherit declaredInputs flakeInputs; };
-      fileToCall = computeNickelFile system { inherit nickelFile exportedPkgs; };
+      pkgsExportResult = exportForNickel exportedPkgs.value;
+      fileToCall = computeNickelFile system { inherit nickelFile; exportedPkgsNcl = pkgsExportResult.value; };
     in
 
-    runCommand "nickel-res.json" {} ''
-      ${nickel}/bin/nickel -f ${fileToCall} export > $out
-    '';
+    {
+      value = runCommand "nickel-res.json" {} ''
+          ${nickel}/bin/nickel -f ${fileToCall} export > $out
+        '';
+      context = pkgsExportResult.context // exportedPkgs.context;
+    };
 
   # Import a Nickel expression as a Nix value. flakeInputs are where the packages
   # passed to the Nickel expression are taken from. If the Nickel expression 
@@ -124,8 +155,8 @@ let
   # attribute "nixpkgs" with a package "hello".
   importNcl = { runCommand, nickel, system, lib, mkShell }@args: nickelFile: flakeInputs:
     let nickelResult = callNickel args { inherit nickelFile flakeInputs; }; in
-    { rawNickel = nickelResult; }
-    // (importFromNickel mkShell (builtins.fromJSON (builtins.readFile nickelResult)));
+    { rawNickel = nickelResult.value; }
+    // (importFromNickel nickelResult.context mkShell (builtins.fromJSON (builtins.readFile nickelResult.value)));
 
 in
 { inherit importNcl; }
