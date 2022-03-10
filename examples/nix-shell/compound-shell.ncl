@@ -2,6 +2,7 @@
   inputs = {
     hello = { input = "nixpkgs" },
     python3 = { input = "nixpkgs" },
+    perl = { input = "nixpkgs" },
   }
 
   , output = fun { pkgs, nix, system } =>
@@ -38,7 +39,8 @@
        name = "hello"
 
        , packages = [
-          pkgs.python3
+          pkgs.python3,
+          pkgs.perl,
        ]
 
        # Need the string hack because `myHello` wouldn’t be in scope otherwise
