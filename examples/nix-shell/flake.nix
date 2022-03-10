@@ -20,6 +20,7 @@
         devShells =
           { withNix = import ./shell.nix { inherit pkgs; };
             withNickel = importNcl ./shell.ncl inputs;
+            withCompoundNickel = importNcl ./compound-shell.ncl inputs;
             withNickelNixString = importNcl ./shell-nix-string.ncl inputs;
           };
       });
